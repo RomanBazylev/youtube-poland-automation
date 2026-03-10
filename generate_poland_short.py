@@ -222,15 +222,6 @@ PEXELS_QUERIES = [
     "medieval castle Europe",
     "church interior Europe",
 ]
-    "Warsaw skyline",
-    "Polish food",
-    "European street",
-    "mountain landscape Poland",
-    "Baltic sea beach",
-    "European architecture",
-    "travel Europe",
-    "city life Europe",
-]
 
 
 @dataclass
