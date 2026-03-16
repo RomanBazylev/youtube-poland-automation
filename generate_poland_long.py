@@ -316,7 +316,11 @@ def step2_generate_script(facts: str, article_title: str) -> Optional[dict]:
     try:
         content = re.sub(r"^```(?:json)?\s*", "", content.strip())
         content = re.sub(r"\s*```$", "", content.strip())
-        data = json.loads(content)
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            content = re.sub(r'[\x00-\x1f\x7f]', lambda m: f'\\u{ord(m.group()):04x}', content)
+            data = json.loads(content)
         script = data.get("script", "")
         word_count = len(script.split())
         print(f"[STEP2] Script generated: {word_count} words")
