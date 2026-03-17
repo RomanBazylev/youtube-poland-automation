@@ -73,4 +73,4 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add used_articles.json performance_log.json || true
-          git diff --cached --quiet || (git commit -m "analytics: update performance + article tracking" && git push)
+          git diff --cached --quiet || (git commit -m "analytics: update performance + article tracking" && git pull --rebase && git push)

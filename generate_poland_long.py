@@ -132,7 +132,7 @@ def _fix_pronunciation(text: str) -> str:
     return result
 
 
-def _groq_call(messages: list, temperature: float = 0.7, max_tokens: int = 4096) -> Optional[str]:
+def _groq_call(messages: list, temperature: float = 0.7, max_tokens: int = 4096, json_mode: bool = False) -> Optional[str]:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         return None
@@ -143,6 +143,8 @@ def _groq_call(messages: list, temperature: float = 0.7, max_tokens: int = 4096)
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
     for attempt in range(1, 3):
         try:
             r = requests.post(GROQ_URL, headers=headers, json=body, timeout=90)
@@ -310,17 +312,26 @@ def step2_generate_script(facts: str, article_title: str) -> Optional[dict]:
   "script": "Полный текст сценария. Каждое предложение на отдельной строке."
 }}"""},
     ]
-    content = _groq_call(messages, temperature=0.8, max_tokens=8192)
+    content = _groq_call(messages, temperature=0.8, max_tokens=8192, json_mode=True)
     if not content:
         return None
     try:
         content = re.sub(r"^```(?:json)?\s*", "", content.strip())
         content = re.sub(r"\s*```$", "", content.strip())
+        # Extract outermost JSON object
+        start = content.find("{")
+        end = content.rfind("}")
+        if start != -1 and end > start:
+            content = content[start:end + 1]
         try:
             data = json.loads(content)
         except json.JSONDecodeError:
             content = re.sub(r'[\x00-\x1f\x7f]', lambda m: f'\\u{ord(m.group()):04x}', content)
-            data = json.loads(content)
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError:
+                import ast
+                data = ast.literal_eval(content)
         script = data.get("script", "")
         word_count = len(script.split())
         print(f"[STEP2] Script generated: {word_count} words")
@@ -337,7 +348,7 @@ def step2_generate_script(facts: str, article_title: str) -> Optional[dict]:
 async def _generate_tts(text: str, output_path: Path) -> list[dict]:
     voice = random.choice(TTS_VOICES)
     tts_text = _fix_pronunciation(text)
-    comm = edge_tts.Communicate(tts_text, voice, rate=TTS_RATE)
+    comm = edge_tts.Communicate(tts_text, voice, rate=TTS_RATE, boundary="WordBoundary")
     word_events = []
     with open(output_path, "wb") as f:
         async for chunk in comm.stream():

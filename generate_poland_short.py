@@ -570,6 +570,7 @@ def call_groq_for_script() -> tuple:
         ],
         "temperature": 0.85,
         "max_tokens": 2048,
+        "response_format": {"type": "json_object"},
     }
 
     def _try_api(payload: dict) -> Optional[requests.Response]:
@@ -587,7 +588,16 @@ def call_groq_for_script() -> tuple:
             content = resp.json()["choices"][0]["message"]["content"]
             content = re.sub(r"^```(?:json)?\s*", "", content.strip())
             content = re.sub(r"\s*```$", "", content.strip())
-            data = json.loads(content)
+            # Extract outermost JSON object
+            start = content.find("{")
+            end = content.rfind("}")
+            if start != -1 and end > start:
+                content = content[start:end + 1]
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError:
+                content = re.sub(r'[\x00-\x1f\x7f]', lambda m: f'\\u{ord(m.group()):04x}', content)
+                data = json.loads(content)
             parts = [ScriptPart(p["text"]) for p in data.get("parts", []) if p.get("text")]
             metadata = VideoMetadata(
                 title=data.get("title", "")[:100] or "Я в Польше: советы и лайфхаки #shorts",
