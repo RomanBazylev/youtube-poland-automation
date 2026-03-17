@@ -290,18 +290,29 @@ def step2_generate_script(facts: str, article_title: str) -> Optional[dict]:
             "- Структура: Введение → Основная часть (5-7 разделов) → Итоги → CTA.\n\n"
             "Отвечай ТОЛЬКО валидным JSON."
         )},
-        {"role": "user", "content": f"""На основе этих фактов напиши сценарий YouTube-видео (8-12 минут, ~1500-2000 слов).
+        {"role": "user", "content": f"""На основе этих фактов напиши сценарий YouTube-видео (8-12 минут).
 
 ТЕМА: {article_title}
 
 ФАКТЫ:
 {facts}
 
-СТРУКТУРА:
-1. ВВЕДЕНИЕ (2-3 фразы): зацепи зрителя — задай вопрос или назови ключевую проблему.
-2. ОСНОВНАЯ ЧАСТЬ (5-7 блоков по 3-5 фраз): раскрой каждый факт подробно, с примерами и пояснениями.
-3. ИТОГИ (2-3 фразы): резюмируй главное.
-4. CTA (1 фраза): призыв подписаться, задать вопрос в комментариях.
+КРИТИЧЕСКИ ВАЖНО: Поле "script" должно содержать НЕ МЕНЕЕ 1200 слов.
+Это ДЛИННОЕ видео, не шортс. Если сценарий меньше 800 слов — видео невозможно произвести.
+
+СТРУКТУРА (напиши ВСЕ секции полностью, НЕ пропускай):
+1. ВВЕДЕНИЕ (60-80 слов): зацепи зрителя — задай вопрос или назови ключевую проблему. Пообещай конкретные ответы.
+2. ОСНОВНАЯ ЧАСТЬ (5-7 блоков, каждый блок 150-200 слов):
+   - Каждый блок начинается с переходной фразы: "Кстати, давайте разберёмся...", "А вот ещё важный момент..."
+   - Раскрой факт подробно: объясни ЧТО, ПОЧЕМУ и КАК
+   - Приведи конкретный пример или ситуацию из жизни
+   - Укажи суммы в злотых, сроки, названия документов
+   - Завершай блок мини-выводом
+3. ИТОГИ (60-80 слов): резюмируй 3 главных вывода.
+4. CTA (30-40 слов): призыв подписаться, поставить лайк, задать вопрос в комментариях.
+
+РАСЧЁТ СЛОВ: Введение (~70) + 6 блоков × 175 слов (~1050) + Итоги (~70) + CTA (~35) = ~1225 слов.
+Ты ДОЛЖЕН написать не менее 1200 слов. Считай внимательно.
 
 ФОРМАТ JSON:
 {{
@@ -309,10 +320,10 @@ def step2_generate_script(facts: str, article_title: str) -> Optional[dict]:
   "description": "Описание 5-8 строк с хештегами",
   "tags": ["польша", "явпольше", ...ещё 10-15 тегов],
   "pexels_queries": ["5-8 английских запросов для поиска видео"],
-  "script": "Полный текст сценария. Каждое предложение на отдельной строке."
+  "script": "ОДНА СТРОКА с полным текстом сценария (1200-1800 слов). Предложения разделены переносами строк. НЕ массив."
 }}"""},
     ]
-    content = _groq_call(messages, temperature=0.8, max_tokens=8192, json_mode=True)
+    content = _groq_call(messages, temperature=0.8, max_tokens=16384, json_mode=True)
     if not content:
         return None
     try:
@@ -333,11 +344,16 @@ def step2_generate_script(facts: str, article_title: str) -> Optional[dict]:
                 import ast
                 data = ast.literal_eval(content)
         script = data.get("script", "")
+        if isinstance(script, list):
+            script = "\n".join(str(s) for s in script)
+            data["script"] = script
         word_count = len(script.split())
         print(f"[STEP2] Script generated: {word_count} words")
-        if word_count < 500:
-            print("[WARN] Script too short, retrying...")
+        if word_count < 250:
+            print("[WARN] Script too short (< 250 words), skipping")
             return None
+        if word_count < 600:
+            print(f"[WARN] Script shorter than ideal ({word_count} words), but usable")
         return data
     except Exception as exc:
         print(f"[WARN] JSON parse failed: {exc}")
