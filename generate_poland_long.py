@@ -646,6 +646,7 @@ def assemble_video(
 # ── YouTube Upload ───────────────────────────────────────────────────
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
+THUMBNAIL_URL = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
 
 
 def _get_access_token() -> str:
@@ -725,12 +726,47 @@ def upload_video(meta: dict) -> str:
     return ""
 
 
+def _set_thumbnail_long(video_id: str, thumb_path: Path) -> None:
+    """Upload custom thumbnail for a long-form video."""
+    try:
+        access_token = _get_access_token()
+    except Exception as exc:
+        print(f"[WARN] Cannot get token for thumbnail: {exc}")
+        return
+
+    thumb_data = thumb_path.read_bytes()
+    print(f"[THUMB] Setting thumbnail ({len(thumb_data) / 1024:.0f} KB)...")
+
+    for attempt in range(1, 4):
+        try:
+            resp = requests.post(
+                THUMBNAIL_URL,
+                params={"videoId": video_id},
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "image/jpeg",
+                    "Content-Length": str(len(thumb_data)),
+                },
+                data=thumb_data,
+                timeout=60,
+            )
+            resp.raise_for_status()
+            print("[THUMB] Thumbnail set!")
+            return
+        except Exception as exc:
+            print(f"[WARN] Thumbnail attempt {attempt}/3: {exc}")
+            if attempt < 3:
+                time.sleep(attempt * 3)
+
+    print("[WARN] Could not set thumbnail, video uploaded without it")
+
+
 # ── Main Pipeline ────────────────────────────────────────────────────
 def main():
     _clean_build_dir()
 
     # 1. Pick article
-    print("[1/7] Fetching sitemap & picking article...")
+    print("[1/8] Fetching sitemap & picking article...")
     all_urls = _fetch_sitemap_urls()
     filtered = _filter_urls(all_urls)
     if not filtered:
@@ -745,7 +781,7 @@ def main():
     print(f"  Article: {article_url}")
 
     # 2. Scrape article
-    print("[2/7] Scraping article...")
+    print("[2/8] Scraping article...")
     title, text = _scrape_article(article_url)
     print(f"  Title: {title}")
     print(f"  Text: {len(text.split())} words")
@@ -759,13 +795,13 @@ def main():
         title, text = _scrape_article(article_url)
 
     # 3. Two-step LLM
-    print("[3/7] Extracting facts (Step 1)...")
+    print("[3/8] Extracting facts (Step 1)...")
     facts = step1_extract_facts(title, text)
     if not facts:
         print("[ERROR] Failed to extract facts")
         sys.exit(1)
 
-    print("[4/7] Generating script (Step 2)...")
+    print("[4/8] Generating script (Step 2)...")
     script_data = None
     for attempt in range(2):
         script_data = step2_generate_script(facts, title)
@@ -791,13 +827,13 @@ def main():
     print(f"  Script: {len(script_text.split())} words")
 
     # 5. TTS
-    print("[5/7] Generating voiceover (edge-tts)...")
+    print("[5/8] Generating voiceover (edge-tts)...")
     audio_path, word_events = generate_tts(script_text)
     voice_dur = _probe_duration(audio_path)
     print(f"  Duration: {voice_dur:.1f}s ({voice_dur/60:.1f} min)")
 
     # 6. Download clips
-    print("[6/7] Downloading video clips...")
+    print("[6/8] Downloading video clips...")
     pexels_queries = script_data.get("pexels_queries", [])
     clips = download_clips(extra_queries=pexels_queries, target=40)
     if not clips:
@@ -807,12 +843,26 @@ def main():
     music = download_music()
 
     # 7. Assemble video
-    print("[7/7] Assembling video with ffmpeg...")
+    print("[7/8] Assembling video with ffmpeg...")
     assemble_video(clips, audio_path, word_events, music)
+
+    # 8. Generate thumbnail
+    print("[8/8] Generating thumbnail...")
+    thumb_path = BUILD_DIR / "thumbnail.jpg"
+    try:
+        from thumbnail_generator import generate_thumbnail
+        generate_thumbnail(meta["title"], meta.get("topic", ""), thumb_path)
+    except Exception as exc:
+        print(f"[WARN] Thumbnail generation failed (non-fatal): {exc}")
+        thumb_path = None
 
     # Upload
     print("[UPLOAD] Uploading to YouTube...")
     video_id = upload_video(meta)
+
+    # Set thumbnail
+    if video_id and thumb_path and thumb_path.is_file():
+        _set_thumbnail_long(video_id, thumb_path)
 
     # Track used article
     used.add(article_url)

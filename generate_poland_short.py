@@ -1035,9 +1035,18 @@ def main() -> None:
     print("[4/5] Downloading background music...")
     music_path = download_background_music()
 
-    print("[5/5] Building final video...")
+    print("[5/6] Building final video...")
     output = build_video(parts, clip_paths, audio_parts, music_path)
-    print(f"Done! Video saved to: {output}")
+    print(f"  Video saved to: {output}")
+
+    print("[6/6] Generating thumbnail...")
+    try:
+        from thumbnail_generator import generate_thumbnail
+        generate_thumbnail(metadata.title, metadata.topic)
+    except Exception as exc:
+        print(f"[WARN] Thumbnail generation failed (non-fatal): {exc}")
+
+    print("Done!")
 
 
 if __name__ == "__main__":

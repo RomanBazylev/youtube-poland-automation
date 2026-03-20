@@ -20,9 +20,11 @@ import requests
 BUILD_DIR = Path("build")
 VIDEO_PATH = BUILD_DIR / "output_poland_short.mp4"
 METADATA_PATH = BUILD_DIR / "metadata.json"
+THUMBNAIL_PATH = BUILD_DIR / "thumbnail.jpg"
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
+THUMBNAIL_URL = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
 
 MAX_UPLOAD_RETRIES = 3
 
@@ -144,6 +146,8 @@ def upload_video() -> str:
             upload_resp.raise_for_status()
             video_id = upload_resp.json().get("id", "")
             print(f"  Uploaded! https://youtube.com/shorts/{video_id}")
+            # Set custom thumbnail
+            _try_set_thumbnail(video_id, access_token)
             try:
                 from analytics import log_upload
                 meta = _load_metadata()
@@ -160,6 +164,40 @@ def upload_video() -> str:
 
     print("[ERROR] All upload attempts failed.")
     return ""
+
+
+def _try_set_thumbnail(video_id: str, access_token: str) -> None:
+    """Upload custom thumbnail if it exists. Non-fatal on failure."""
+    thumb = THUMBNAIL_PATH
+    if not thumb.is_file():
+        print("[THUMB] No thumbnail file found, skipping")
+        return
+
+    thumb_data = thumb.read_bytes()
+    print(f"  Setting thumbnail ({len(thumb_data) / 1024:.0f} KB)...")
+
+    for attempt in range(1, 4):
+        try:
+            resp = requests.post(
+                THUMBNAIL_URL,
+                params={"videoId": video_id},
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "image/jpeg",
+                    "Content-Length": str(len(thumb_data)),
+                },
+                data=thumb_data,
+                timeout=60,
+            )
+            resp.raise_for_status()
+            print("  Thumbnail set!")
+            return
+        except Exception as exc:
+            print(f"[WARN] Thumbnail attempt {attempt}/3 failed: {exc}")
+            if attempt < 3:
+                time.sleep(attempt * 3)
+
+    print("[WARN] Could not set thumbnail, video uploaded without it")
 
 
 if __name__ == "__main__":
