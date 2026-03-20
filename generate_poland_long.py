@@ -317,6 +317,7 @@ def step2_generate_script(facts: str, article_title: str) -> Optional[dict]:
 ФОРМАТ JSON:
 {{
   "title": "Заголовок видео, до 90 символов, с эмодзи 🇵🇱",
+  "thumbnail_text": "СОКРАЩЁННЫЙ ЗАГОЛОВОК ДЛЯ ПРЕВЬЮ — 2-4 слова ЗАГЛАВНЫМИ, передающие СУТЬ видео. Пример: 'РАБОТА В ПОЛЬШЕ', 'СЕКРЕТЫ КРАКОВА', 'ПОЛУЧИТЬ ПЕСЕЛЬ'",
   "description": "Описание 5-8 строк с хештегами",
   "tags": ["польша", "явпольше", ...ещё 10-15 тегов],
   "pexels_queries": ["5-8 английских запросов для поиска видео"],
@@ -851,7 +852,8 @@ def main():
     thumb_path = BUILD_DIR / "thumbnail.jpg"
     try:
         from thumbnail_generator import generate_thumbnail
-        generate_thumbnail(meta["title"], meta.get("topic", ""), thumb_path)
+        thumb_text = script_data.get("thumbnail_text", "")
+        generate_thumbnail(meta["title"], meta.get("topic", ""), thumb_path, thumbnail_text=thumb_text)
     except Exception as exc:
         print(f"[WARN] Thumbnail generation failed (non-fatal): {exc}")
         thumb_path = None

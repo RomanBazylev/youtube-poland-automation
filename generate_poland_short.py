@@ -237,6 +237,7 @@ class VideoMetadata:
     description: str
     tags: List[str]
     topic: str = ""
+    thumbnail_text: str = ""
 
 
 def ensure_dirs() -> None:
@@ -552,6 +553,7 @@ def call_groq_for_script() -> tuple:
 Формат — строго JSON:
 {{
   "title": "Цепляющий заголовок, до 80 символов, с эмодзи 🇵🇱 и #shorts в конце",
+  "thumbnail_text": "СОКРАЩЁННЫЙ ЗАГОЛОВОК ДЛЯ ПРЕВЬЮ — 2-4 слова ЗАГЛАВНЫМИ, передающие СУТЬ видео. Пример: тема 'Как подростки могут заработать в Польше' → 'РАБОТА ПОДРОСТКОВ'. Тема 'Польская кухня — пероги, журек' → 'КУХНЯ ПОЛЬШИ'. Тема 'Как получить PESEL' → 'ПОЛУЧИТЬ ПЕСЕЛЬ'",
   "description": "Описание 3–5 строк с хештегами:\\n- первая строка — о чём видео\\n- вторая — ключевой факт или совет\\n- третья — хештеги (#польша #явпольше #shorts ...)",
   "tags": ["польша", "явпольше", "shorts", ...ещё 10–15 тематических тегов],
   "pexels_queries": ["3–5 коротких англ. запросов для поиска видео на Pexels"],
@@ -604,6 +606,7 @@ def call_groq_for_script() -> tuple:
                 description=data.get("description", "") or "Смотри до конца! #польша #явпольше #shorts",
                 tags=data.get("tags", ["польша", "явпольше", "shorts"]),
                 topic=topic,
+                thumbnail_text=data.get("thumbnail_text", ""),
             )
             llm_queries = data.get("pexels_queries", [])
             if llm_queries:
@@ -995,7 +998,7 @@ def _save_metadata(meta: VideoMetadata) -> None:
     meta_path = BUILD_DIR / "metadata.json"
     meta_path.write_text(
         json.dumps(
-            {"title": meta.title, "description": meta.description, "tags": meta.tags, "topic": meta.topic},
+            {"title": meta.title, "description": meta.description, "tags": meta.tags, "topic": meta.topic, "thumbnail_text": meta.thumbnail_text},
             ensure_ascii=False,
             indent=2,
         ),
@@ -1042,7 +1045,7 @@ def main() -> None:
     print("[6/6] Generating thumbnail...")
     try:
         from thumbnail_generator import generate_thumbnail
-        generate_thumbnail(metadata.title, metadata.topic)
+        generate_thumbnail(metadata.title, metadata.topic, thumbnail_text=metadata.thumbnail_text)
     except Exception as exc:
         print(f"[WARN] Thumbnail generation failed (non-fatal): {exc}")
 

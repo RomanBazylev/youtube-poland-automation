@@ -3,11 +3,10 @@ Thumbnail generator for «Я в Польше» YouTube channel.
 Composes eye-catching 1280×720 thumbnails with:
   - Pexels photo background (topic-relevant)
   - Dark gradient overlay for text contrast
-  - Large bold hook text (2–5 words, Cyrillic)
-  - Optional accent stripe and emoji badge
+  - Large bold text from LLM-generated thumbnail_text
+  - Accent stripe and emoji badge
 """
 
-import json
 import os
 import random
 import re
@@ -33,83 +32,25 @@ _ACCENT_COLORS = [
 
 _FLAG_EMOJI = "🇵🇱"
 
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+_PEXELS_FALLBACK_QUERIES = [
+    "Poland city landscape",
+    "Krakow old town",
+    "Warsaw skyline",
+    "European street cafe",
+    "Poland nature",
+]
 
 
-# ── LLM: generate hook text ───────────────────────────────────────────
-def generate_hook(title: str, topic: str = "") -> dict:
-    """Ask Groq LLM for a short catchy hook phrase for the thumbnail."""
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        return _fallback_hook(title)
-
-    context = topic or title
-    messages = [
-        {"role": "system", "content": (
-            "Ты — эксперт по YouTube-превью. "
-            "Твоя задача — придумать КОРОТКУЮ цепляющую фразу для превью-картинки видео. "
-            "Фраза должна вызывать любопытство и желание кликнуть.\n\n"
-            "ПРАВИЛА:\n"
-            "- Максимум 4 слова (лучше 2-3)\n"
-            "- ВСЕ ЗАГЛАВНЫЕ БУКВЫ\n"
-            "- Хук должен ИНТРИГОВАТЬ, а не описывать\n"
-            "- Используй числа, если уместно (\"500 ЗЛОТЫХ\", \"3 ОШИБКИ\")\n"
-            "- Используй эмоциональные слова: ШОКИРУЕТ, СЕКРЕТ, ПРАВДА, ЛУЧШИЙ, БЕСПЛАТНО\n"
-            "- Пиши на РУССКОМ языке\n"
-            "- Отвечай ТОЛЬКО валидным JSON"
-        )},
-        {"role": "user", "content": (
-            f"Тема видео: {context}\n\n"
-            "Придумай фразу для превью. Верни JSON:\n"
-            "{\n"
-            '  "hook": "КОРОТКАЯ ФРАЗА",\n'
-            '  "pexels_query": "english search query for background photo",\n'
-            '  "accent_color": "red|orange|teal|purple|pink|green|yellow"\n'
-            "}"
-        )},
-    ]
-
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    body = {
-        "model": GROQ_MODEL,
-        "messages": messages,
-        "temperature": 0.9,
-        "max_tokens": 256,
-        "response_format": {"type": "json_object"},
-    }
-
-    for attempt in range(1, 3):
-        try:
-            r = requests.post(GROQ_URL, headers=headers, json=body, timeout=30)
-            r.raise_for_status()
-            content = r.json()["choices"][0]["message"]["content"]
-            data = json.loads(content)
-            hook = data.get("hook", "").strip().upper()
-            if hook and len(hook.split()) <= 6:
-                return {
-                    "hook": hook,
-                    "pexels_query": data.get("pexels_query", "Poland city"),
-                    "accent_color": data.get("accent_color", "red"),
-                }
-        except Exception as exc:
-            print(f"[THUMB] Hook generation attempt {attempt} failed: {exc}")
-
-    return _fallback_hook(title)
-
-
-def _fallback_hook(title: str) -> dict:
-    """Generate a simple hook from the title when LLM is unavailable."""
-    hooks = [
-        "СМОТРИ ДО КОНЦА", "НАДО ЗНАТЬ", "ВСЯ ПРАВДА",
-        "СЕКРЕТЫ ПОЛЬШИ", "ТОП СОВЕТОВ", "НЕ ПРОПУСТИ",
-        "ВАЖНО ЗНАТЬ", "ПРОВЕРЕНО", "ЛАЙФХАК",
-    ]
-    return {
-        "hook": random.choice(hooks),
-        "pexels_query": "Poland city landscape",
-        "accent_color": "red",
-    }
+# ── Resolve thumbnail text ────────────────────────────────────────────
+def _clean_title_for_thumbnail(title: str) -> str:
+    """Strip emoji, #shorts, and trim to fit as fallback thumbnail text."""
+    text = re.sub(r'#\w+', '', title)
+    text = re.sub(r'[^\w\s\-–—.,!?]', '', text)
+    text = text.strip().strip('–—-').strip()
+    words = text.split()
+    if len(words) > 5:
+        words = words[:5]
+    return ' '.join(words).upper()
 
 
 # ── Download Pexels photo ─────────────────────────────────────────────
@@ -152,19 +93,6 @@ def _download_pexels_photo(query: str) -> Optional[Image.Image]:
 
 
 # ── Image composition ─────────────────────────────────────────────────
-def _resolve_accent(name: str) -> tuple:
-    mapping = {
-        "red": (255, 59, 48),
-        "orange": (255, 149, 0),
-        "teal": (0, 199, 190),
-        "purple": (88, 86, 214),
-        "pink": (255, 45, 85),
-        "green": (52, 199, 89),
-        "yellow": (255, 204, 0),
-    }
-    return mapping.get(name, random.choice(_ACCENT_COLORS))
-
-
 def _crop_cover(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
     """Resize & crop image to exactly fill target dimensions (cover mode)."""
     src_ratio = img.width / img.height
@@ -331,30 +259,34 @@ def compose_thumbnail(
 
 
 # ── Public API ─────────────────────────────────────────────────────────
-def generate_thumbnail(title: str, topic: str = "", output_path: Optional[Path] = None) -> Optional[Path]:
-    """Full pipeline: LLM hook → Pexels photo → compose → save JPEG."""
+def generate_thumbnail(
+    title: str,
+    topic: str = "",
+    output_path: Optional[Path] = None,
+    thumbnail_text: str = "",
+) -> Optional[Path]:
+    """Full pipeline: resolve text → Pexels photo → compose → save JPEG."""
     if output_path is None:
         output_path = Path("build") / "thumbnail.jpg"
 
     print("[THUMB] Generating thumbnail...")
 
-    # 1) LLM hook text
-    hook_data = generate_hook(title, topic)
-    hook_text = hook_data["hook"]
-    pexels_query = hook_data["pexels_query"]
-    accent = _resolve_accent(hook_data["accent_color"])
-    print(f"[THUMB] Hook: {hook_text}")
-    print(f"[THUMB] Pexels query: {pexels_query}")
+    # 1) Determine display text
+    hook_text = thumbnail_text.strip().upper() if thumbnail_text.strip() else _clean_title_for_thumbnail(title)
+    print(f"[THUMB] Text: {hook_text}")
 
     # 2) Download background photo
+    pexels_query = "Poland " + random.choice(["city", "landscape", "street", "travel", "nature"])
+    print(f"[THUMB] Pexels query: {pexels_query}")
+
     bg = _download_pexels_photo(pexels_query)
     if not bg:
-        # Fallback: try a generic Poland query
-        bg = _download_pexels_photo("Poland landscape city")
+        bg = _download_pexels_photo(random.choice(_PEXELS_FALLBACK_QUERIES))
     if bg:
         print(f"[THUMB] Background: {bg.size[0]}x{bg.size[1]}")
     else:
         print("[THUMB] No background photo, using solid color fallback")
 
     # 3) Compose
+    accent = random.choice(_ACCENT_COLORS)
     return compose_thumbnail(bg, hook_text, accent, output_path)
