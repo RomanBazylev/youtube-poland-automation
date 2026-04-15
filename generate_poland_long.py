@@ -18,9 +18,15 @@ from pathlib import Path
 from typing import List, Optional
 from xml.etree import ElementTree
 
+import urllib3.util.connection
+
 import edge_tts
 import requests
 from bs4 import BeautifulSoup
+
+# Force IPv4 – GitHub Actions runners often lack IPv6 connectivity,
+# causing "Network is unreachable" when DNS returns an AAAA record first.
+urllib3.util.connection.HAS_IPV6 = False
 
 # ── Constants ──────────────────────────────────────────────────────────
 BUILD_DIR = Path("build")
@@ -164,7 +170,7 @@ def _fetch_sitemap_urls() -> list[str]:
         try:
             r = requests.get(sitemap_url, timeout=30)
             if r.status_code == 404:
-                break
+                continue
             r.raise_for_status()
             root = ElementTree.fromstring(r.content)
             for url_elem in root.findall("sm:url/sm:loc", ns):
@@ -172,7 +178,7 @@ def _fetch_sitemap_urls() -> list[str]:
                     all_urls.append(url_elem.text.strip())
         except Exception as exc:
             print(f"[WARN] Sitemap {sitemap_url}: {exc}")
-            break
+            continue
     print(f"[SITEMAP] Fetched {len(all_urls)} URLs")
     return all_urls
 
