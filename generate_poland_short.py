@@ -4,6 +4,7 @@ import os
 import random
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -576,13 +577,22 @@ def call_groq_for_script() -> tuple:
     }
 
     def _try_api(payload: dict) -> Optional[requests.Response]:
-        for attempt in range(1, 3):
+        for attempt in range(1, 6):
             try:
                 r = requests.post(url, headers=headers, json=payload, timeout=45)
                 r.raise_for_status()
                 return r
+            except requests.exceptions.HTTPError as exc:
+                if r.status_code == 429:
+                    wait = min(10 * (2 ** (attempt - 1)), 120)
+                    print(f"[WARN] Groq API attempt {attempt}: 429 rate limited, waiting {wait}s...")
+                    time.sleep(wait)
+                else:
+                    print(f"[WARN] Groq API attempt {attempt}: {exc}")
+                    time.sleep(5)
             except Exception as exc:
-                print(f"[WARN] Groq API attempt {attempt} failed: {exc}")
+                print(f"[WARN] Groq API attempt {attempt}: {exc}")
+                time.sleep(5)
         return None
 
     def _parse_response(resp: requests.Response) -> Optional[tuple]:

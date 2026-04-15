@@ -151,13 +151,21 @@ def _groq_call(messages: list, temperature: float = 0.7, max_tokens: int = 4096,
     }
     if json_mode:
         body["response_format"] = {"type": "json_object"}
-    for attempt in range(1, 3):
+    for attempt in range(1, 6):
         try:
             r = requests.post(GROQ_URL, headers=headers, json=body, timeout=90)
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
+        except requests.exceptions.HTTPError as exc:
+            if r.status_code == 429:
+                wait = min(10 * (2 ** (attempt - 1)), 120)
+                print(f"[WARN] Groq attempt {attempt}: 429 rate limited, waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"[WARN] Groq attempt {attempt}: {exc}")
+                time.sleep(5)
         except Exception as exc:
-            print(f"[WARN] Groq attempt {attempt} failed: {exc}")
+            print(f"[WARN] Groq attempt {attempt}: {exc}")
             time.sleep(5)
     return None
 
