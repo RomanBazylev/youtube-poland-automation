@@ -291,6 +291,30 @@ _FILLER_PATTERNS = [
 ]
 
 
+def _is_mostly_russian(text: str, min_ratio: float = 0.6) -> bool:
+    # Ignore hashtags/URLs so tokens like #shorts do not trigger false rejects.
+    cleaned = re.sub(r'https?://\S+', ' ', text)
+    cleaned = re.sub(r'#[\w\-]+', ' ', cleaned)
+    cleaned = cleaned.replace("shorts", " ").replace("SHORTS", " ")
+
+    cyr = len(re.findall(r"[А-Яа-яЁё]", cleaned))
+    lat = len(re.findall(r"[A-Za-z]", cleaned))
+    total = cyr + lat
+    if total == 0:
+        return True
+    return (cyr / total) >= min_ratio
+
+
+def _validate_metadata_language(meta: VideoMetadata) -> bool:
+    if not _is_mostly_russian(meta.title, min_ratio=0.5):
+        print("[QUALITY] Rejected: title is not Russian enough")
+        return False
+    if not _is_mostly_russian(meta.description, min_ratio=0.5):
+        print("[QUALITY] Rejected: description is not Russian enough")
+        return False
+    return True
+
+
 def _validate_script(parts: List[ScriptPart]) -> bool:
     """Проверяет качество сценария."""
     if len(parts) < 8:
@@ -314,6 +338,16 @@ def _validate_script(parts: List[ScriptPart]) -> bool:
         print(f"[QUALITY] Rejected: too many fillers ({filler_count})")
         return False
 
+    total_words = sum(len(p.text.split()) for p in parts)
+    if total_words < 95:
+        print(f"[QUALITY] Rejected: script too short ({total_words} words, need >=95)")
+        return False
+
+    russian_lines = sum(1 for p in parts if _is_mostly_russian(p.text, min_ratio=0.75))
+    if russian_lines < max(1, int(len(parts) * 0.9)):
+        print(f"[QUALITY] Rejected: not enough Russian lines ({russian_lines}/{len(parts)})")
+        return False
+
     # Минимум 30% фраз с конкретикой (цифры, места, еда, действия, культура)
     concrete_markers = re.compile(
         r'\d|злот|евро|рубл|месяц|недел|год|день|час|'
@@ -331,8 +365,8 @@ def _validate_script(parts: List[ScriptPart]) -> bool:
     )
     concrete_count = sum(1 for p in parts if concrete_markers.search(p.text))
     ratio = concrete_count / len(parts)
-    if ratio < 0.30:
-        print(f"[QUALITY] Rejected: not enough concrete content ({ratio:.0%}, need >=30%)")
+    if ratio < 0.40:
+        print(f"[QUALITY] Rejected: not enough concrete content ({ratio:.0%}, need >=40%)")
         return False
 
     # Проверка связности — хотя бы 20% фраз содержат переходные слова
@@ -622,7 +656,7 @@ def call_groq_for_script() -> tuple:
             if llm_queries:
                 global _llm_pexels_queries
                 _llm_pexels_queries = [q for q in llm_queries if isinstance(q, str)][:5]
-            if _validate_script(parts):
+            if _validate_script(parts) and _validate_metadata_language(metadata):
                 return parts, _enrich_metadata(metadata)
             print("[WARN] LLM output failed quality check")
         except Exception as exc:

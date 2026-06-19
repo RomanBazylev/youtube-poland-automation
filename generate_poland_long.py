@@ -14,8 +14,10 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import urlparse
 from xml.etree import ElementTree
 
 import urllib3.util.connection
@@ -36,27 +38,48 @@ MUSIC_PATH = BUILD_DIR / "music.mp3"
 METADATA_PATH = BUILD_DIR / "metadata.json"
 OUTPUT_PATH = BUILD_DIR / "output_poland_long.mp4"
 USED_ARTICLES_PATH = Path("used_articles.json")
+SOURCE_HISTORY_PATH = Path("source_history.json")
 
 TARGET_W, TARGET_H = 1280, 720
 FPS = 30
 FFMPEG_PRESET = "medium"
 FFMPEG_CRF = "23"
 
-SITEMAP_URLS = [
-    "https://poland-consult.com/post-sitemap.xml",
-    "https://poland-consult.com/post-sitemap2.xml",
-    "https://poland-consult.com/post-sitemap3.xml",
-    "https://poland-consult.com/post-sitemap4.xml",
-]
+BLOCKED_HOST_SUFFIXES = [".ua"]
+SOURCE_PRIORITY = ["poland-consult.com", "pap.pl", "realting.com"]
 
-ALLOWED_PREFIXES = [
-    "/praca/", "/eu/pl/nalogi/", "/biznes/", "/polezno-znat/",
-    "/vnzh-i-pmzh/", "/eu/pl/zasilki/", "/eu/pl/uchodzcy/",
-]
-EXCLUDED_PREFIXES = [
-    "/gazetki/", "/novosti/", "/coronavirus/", "/uk/",
-    "/eu/germany/", "/eu/cz/", "/usa/",
-]
+SOURCE_CONFIG = {
+    "poland-consult.com": {
+        "sitemaps": [
+            "https://poland-consult.com/post-sitemap.xml",
+            "https://poland-consult.com/post-sitemap2.xml",
+            "https://poland-consult.com/post-sitemap3.xml",
+            "https://poland-consult.com/post-sitemap4.xml",
+        ],
+        "allowed_prefixes": [
+            "/praca/", "/eu/pl/nalogi/", "/biznes/", "/polezno-znat/",
+            "/vnzh-i-pmzh/", "/eu/pl/zasilki/", "/eu/pl/uchodzcy/",
+        ],
+        "excluded_prefixes": [
+            "/gazetki/", "/novosti/", "/coronavirus/", "/uk/",
+            "/eu/germany/", "/eu/cz/", "/usa/",
+        ],
+    },
+    # Russian section on PAP gives stable non-Ukrainian Poland news updates.
+    "www.pap.pl": {
+        "sitemaps": [
+            "https://www.pap.pl/sitemap.xml",
+            "https://www.pap.pl/post-sitemap.xml",
+        ],
+        "allowed_prefixes": ["/ru/"],
+        "excluded_prefixes": ["/uk/", "/ua/"],
+    },
+    "realting.com": {
+        "sitemaps": ["https://realting.com/sitemap.xml"],
+        "allowed_prefixes": ["/ru/news/"],
+        "excluded_prefixes": ["/ua/", "/uk/"],
+    },
+}
 
 TTS_VOICES = ["ru-RU-DmitryNeural", "ru-RU-SvetlanaNeural"]
 TTS_RATE = "+3%"
@@ -98,7 +121,7 @@ MUSIC_URLS = [
 
 _DESCRIPTION_FOOTER = (
     "\n\n---\n"
-    "По материалам poland-consult.com\n"
+    "По материалам {source_host}\n"
     "Подписывайся на «Я в Польше» — новый ролик каждую неделю! 🔔\n"
     "Задавай вопросы в комментариях 👇"
 )
@@ -174,34 +197,162 @@ def _groq_call(messages: list, temperature: float = 0.7, max_tokens: int = 4096,
 def _fetch_sitemap_urls() -> list[str]:
     ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
     all_urls = []
-    for sitemap_url in SITEMAP_URLS:
-        try:
-            r = requests.get(sitemap_url, timeout=30)
-            if r.status_code == 404:
+    for host, cfg in SOURCE_CONFIG.items():
+        for sitemap_url in cfg["sitemaps"]:
+            try:
+                r = requests.get(sitemap_url, timeout=30)
+                if r.status_code == 404:
+                    continue
+                r.raise_for_status()
+                root = ElementTree.fromstring(r.content)
+                for url_elem in root.findall("sm:url/sm:loc", ns):
+                    if url_elem.text:
+                        all_urls.append(url_elem.text.strip())
+            except Exception as exc:
+                print(f"[WARN] Sitemap {host} {sitemap_url}: {exc}")
                 continue
-            r.raise_for_status()
-            root = ElementTree.fromstring(r.content)
-            for url_elem in root.findall("sm:url/sm:loc", ns):
-                if url_elem.text:
-                    all_urls.append(url_elem.text.strip())
-        except Exception as exc:
-            print(f"[WARN] Sitemap {sitemap_url}: {exc}")
-            continue
     print(f"[SITEMAP] Fetched {len(all_urls)} URLs")
     return all_urls
 
 
+def _fetch_wayback_urls() -> list[str]:
+    """Fallback: query Wayback CDX for sources where useful path prefixes are known."""
+    print("[FALLBACK] Querying Wayback Machine CDX API for article URLs...")
+    base = "https://web.archive.org/cdx/search/cdx"
+    all_urls = []
+    seen = set()
+    for host, cfg in SOURCE_CONFIG.items():
+        for prefix in cfg["allowed_prefixes"]:
+            pattern = prefix.strip("/")
+            try:
+                params = {
+                    "url": f"{host}/{pattern}/*",
+                    "output": "json",
+                    "fl": "original",
+                    "collapse": "urlkey",
+                    "limit": "300",
+                    "filter": "statuscode:200",
+                }
+                r = requests.get(base, params=params, timeout=30)
+                r.raise_for_status()
+                rows = r.json()
+                for row in rows[1:]:
+                    url = row[0]
+                    if url not in seen:
+                        seen.add(url)
+                        all_urls.append(url)
+            except Exception as exc:
+                print(f"[WARN] Wayback CDX for {host}/{pattern}: {exc}")
+    print(f"[WAYBACK] Found {len(all_urls)} archived URLs")
+    return all_urls
+
+
+def _normalize_host(host: str) -> str:
+    host = (host or "").lower().split(":", 1)[0].strip()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _get_source_cfg_for_host(host: str) -> Optional[dict]:
+    norm_host = _normalize_host(host)
+    for cfg_host, cfg in SOURCE_CONFIG.items():
+        if _normalize_host(cfg_host) == norm_host:
+            return cfg
+    return None
+
+
 def _filter_urls(urls: list[str]) -> list[str]:
-    from urllib.parse import urlparse
     filtered = []
     for url in urls:
-        path = urlparse(url).path
-        if any(path.startswith(ex) for ex in EXCLUDED_PREFIXES):
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").lower()
+        norm_host = _normalize_host(host)
+        path = parsed.path or "/"
+        if not host:
             continue
-        if any(path.startswith(al) for al in ALLOWED_PREFIXES):
+
+        if any(norm_host.endswith(sfx) for sfx in BLOCKED_HOST_SUFFIXES):
+            continue
+
+        cfg = _get_source_cfg_for_host(norm_host)
+        if not cfg:
+            continue
+
+        if any(path.startswith(ex) for ex in cfg["excluded_prefixes"]):
+            continue
+        if any(path.startswith(al) for al in cfg["allowed_prefixes"]):
             filtered.append(url)
     print(f"[FILTER] {len(filtered)} articles in allowed categories")
     return filtered
+
+
+def _build_description_footer(source_url: str) -> str:
+    host = (urlparse(source_url).netloc or "источников").lower()
+    return _DESCRIPTION_FOOTER.format(source_host=host)
+
+
+def _is_mostly_russian(text: str, min_ratio: float = 0.6) -> bool:
+    cyr = len(re.findall(r"[А-Яа-яЁё]", text))
+    lat = len(re.findall(r"[A-Za-z]", text))
+    total = cyr + lat
+    if total == 0:
+        return True
+    return (cyr / total) >= min_ratio
+
+
+def _validate_russian_payload(data: dict) -> bool:
+    script = str(data.get("script", ""))
+    title = str(data.get("title", ""))
+    description = str(data.get("description", ""))
+
+    if not _is_mostly_russian(script, min_ratio=0.75):
+        print("[WARN] Script is not Russian enough, retrying")
+        return False
+    if not _is_mostly_russian(title, min_ratio=0.5):
+        print("[WARN] Title is not Russian enough, retrying")
+        return False
+    if not _is_mostly_russian(description, min_ratio=0.5):
+        print("[WARN] Description is not Russian enough, retrying")
+        return False
+    return True
+
+
+def _load_last_source_host() -> str:
+    if not SOURCE_HISTORY_PATH.is_file():
+        return ""
+    try:
+        data = json.loads(SOURCE_HISTORY_PATH.read_text(encoding="utf-8"))
+        return _normalize_host(str(data.get("last_source", "")))
+    except Exception:
+        return ""
+
+
+def _save_last_source_host(url: str):
+    host = _normalize_host(urlparse(url).netloc)
+    SOURCE_HISTORY_PATH.write_text(
+        json.dumps({"last_source": host}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _score_article_url(url: str) -> float:
+    path = (urlparse(url).path or "").lower()
+    current_year = datetime.now().year
+    score = random.random()
+
+    if str(current_year) in path:
+        score += 1.0
+    elif str(current_year - 1) in path:
+        score += 0.6
+
+    if re.search(r"\d{1,4}", path):
+        score += 0.2
+
+    slug_parts = [p for p in path.split("/") if p]
+    if slug_parts:
+        score += min(len(slug_parts[-1]) / 120.0, 0.5)
+    return score
 
 
 def _load_used_articles() -> set:
@@ -219,7 +370,7 @@ def _save_used_articles(used: set):
     )
 
 
-def _pick_article(urls: list[str], used: set) -> Optional[str]:
+def _pick_article(urls: list[str], used: set, last_source_host: str = "") -> Optional[str]:
     available = [u for u in urls if u not in used]
     if not available:
         print("[WARN] All articles used, resetting history")
@@ -227,14 +378,38 @@ def _pick_article(urls: list[str], used: set) -> Optional[str]:
         used.clear()
     if not available:
         return None
-    return random.choice(available)
+
+    by_host = {}
+    for u in available:
+        host = _normalize_host(urlparse(u).netloc)
+        by_host.setdefault(host, []).append(u)
+
+    candidate_hosts = list(by_host.keys())
+    if last_source_host and len(candidate_hosts) > 1:
+        non_repeat = [h for h in candidate_hosts if h != last_source_host]
+        if non_repeat:
+            candidate_hosts = non_repeat
+
+    def _host_priority(host: str) -> int:
+        try:
+            return SOURCE_PRIORITY.index(host)
+        except ValueError:
+            return len(SOURCE_PRIORITY) + 100
+
+    candidate_hosts.sort(key=lambda h: (_host_priority(h), random.random()))
+    chosen_host = candidate_hosts[0]
+    candidates = by_host[chosen_host]
+    candidates.sort(key=_score_article_url, reverse=True)
+
+    top_n = candidates[: min(3, len(candidates))]
+    pick = random.choice(top_n)
+    print(f"[SOURCE] Selected host: {chosen_host} ({len(candidates)} candidates)")
+    return pick
 
 
-def _scrape_article(url: str) -> tuple[str, str]:
-    """Scrape article title and text from poland-consult.com."""
-    r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
+def _parse_article_html(html: str) -> tuple[str, str]:
+    """Extract title and body text from article HTML."""
+    soup = BeautifulSoup(html, "html.parser")
 
     title = ""
     title_tag = soup.find("h1")
@@ -255,8 +430,36 @@ def _scrape_article(url: str) -> tuple[str, str]:
         text = soup.get_text(separator="\n", strip=True)
 
     lines = [l.strip() for l in text.split("\n") if l.strip()]
-    text = "\n".join(lines)
-    return title, text
+    return title, "\n".join(lines)
+
+
+def _scrape_article(url: str) -> tuple[str, str]:
+    """Scrape article title and text. Falls back to Wayback Machine if live site is unreachable."""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, timeout=30, headers=headers)
+        r.raise_for_status()
+        return _parse_article_html(r.text)
+    except Exception as exc:
+        print(f"[WARN] Live scrape failed ({exc}), trying Wayback Machine...")
+
+    # Wayback Machine availability API → get the closest snapshot URL
+    try:
+        avail = requests.get(
+            "https://archive.org/wayback/available",
+            params={"url": url},
+            timeout=20,
+        )
+        avail.raise_for_status()
+        snapshot_url = avail.json().get("archived_snapshots", {}).get("closest", {}).get("url")
+        if not snapshot_url:
+            raise ValueError("No Wayback snapshot available")
+        print(f"[WAYBACK] Fetching snapshot: {snapshot_url}")
+        r2 = requests.get(snapshot_url, timeout=30, headers=headers)
+        r2.raise_for_status()
+        return _parse_article_html(r2.text)
+    except Exception as exc2:
+        raise RuntimeError(f"Could not scrape {url} via live or Wayback: {exc2}") from exc2
 
 
 # ── Two-Step LLM Pipeline ────────────────────────────────────────────
@@ -369,6 +572,8 @@ def step2_generate_script(facts: str, article_title: str) -> Optional[dict]:
             return None
         if word_count < 600:
             print(f"[WARN] Script shorter than ideal ({word_count} words), but usable")
+        if not _validate_russian_payload(data):
+            return None
         return data
     except Exception as exc:
         print(f"[WARN] JSON parse failed: {exc}")
@@ -379,7 +584,8 @@ def step2_generate_script(facts: str, article_title: str) -> Optional[dict]:
 async def _generate_tts(text: str, output_path: Path) -> list[dict]:
     voice = random.choice(TTS_VOICES)
     tts_text = _fix_pronunciation(text)
-    comm = edge_tts.Communicate(tts_text, voice, rate=TTS_RATE, boundary="WordBoundary")
+    # edge-tts >= 6.x emits WordBoundary events by default in stream().
+    comm = edge_tts.Communicate(tts_text, voice, rate=TTS_RATE)
     word_events = []
     with open(output_path, "wb") as f:
         async for chunk in comm.stream():
@@ -785,29 +991,44 @@ def main():
     all_urls = _fetch_sitemap_urls()
     filtered = _filter_urls(all_urls)
     if not filtered:
+        print("[WARN] Sitemaps returned no usable URLs — falling back to Wayback Machine CDX")
+        wayback_urls = _fetch_wayback_urls()
+        filtered = _filter_urls(wayback_urls)
+    if not filtered:
         print("[ERROR] No articles found in allowed categories")
         sys.exit(1)
 
     used = _load_used_articles()
-    article_url = _pick_article(filtered, used)
+    last_source_host = _load_last_source_host()
+    article_url = _pick_article(filtered, used, last_source_host=last_source_host)
     if not article_url:
         print("[ERROR] No article available")
         sys.exit(1)
     print(f"  Article: {article_url}")
+    _save_last_source_host(article_url)
 
     # 2. Scrape article
     print("[2/8] Scraping article...")
-    title, text = _scrape_article(article_url)
+    try:
+        title, text = _scrape_article(article_url)
+    except Exception as exc:
+        print(f"[ERROR] Could not scrape article: {exc}")
+        sys.exit(1)
     print(f"  Title: {title}")
     print(f"  Text: {len(text.split())} words")
     if len(text.split()) < 100:
         print("[WARN] Article too short, picking another...")
         used.add(article_url)
         _save_used_articles(used)
-        article_url = _pick_article(filtered, used)
+        article_url = _pick_article(filtered, used, last_source_host=last_source_host)
         if not article_url:
             sys.exit(1)
-        title, text = _scrape_article(article_url)
+        _save_last_source_host(article_url)
+        try:
+            title, text = _scrape_article(article_url)
+        except Exception as exc:
+            print(f"[ERROR] Could not scrape fallback article: {exc}")
+            sys.exit(1)
 
     # 3. Two-step LLM
     print("[3/8] Extracting facts (Step 1)...")
@@ -831,7 +1052,7 @@ def main():
     script_text = script_data["script"]
     meta = {
         "title": script_data.get("title", title)[:100],
-        "description": script_data.get("description", "") + _DESCRIPTION_FOOTER,
+        "description": script_data.get("description", "") + _build_description_footer(article_url),
         "tags": list(dict.fromkeys(script_data.get("tags", []) + _CORE_TAGS))[:20],
         "topic": title,
     }
